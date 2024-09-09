@@ -23,7 +23,7 @@ include = [
 ]
 
 [tool.poetry.dependencies]
-deepfilterlib = "0.5.3"
+deepfilterlib = "0.5.6"
 deepfilterdataloader = { version = "0.5.3", optional = true }
 python = ">=3.8,<4.0"
 numpy = ">=1.22,<2.0"
