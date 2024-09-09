@@ -145,7 +145,7 @@ jobs:
           delvewheel repair target/wheels/DeepFilterLib-*.whl -w target/repaired
           mv target/repaired/* target/wheels/
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: libdf-wheels-${{ needs.create-release.outputs.df_version }}
           path: target/wheels/
@@ -167,7 +167,7 @@ jobs:
       - name: Build wheels
         run: poetry build -vvv
         working-directory: DeepFilterNet
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: deepfilternet-wheels-${{ needs.create-release.outputs.df_version }}
           path: DeepFilterNet/dist/
@@ -247,7 +247,7 @@ jobs:
             --target ${{ matrix.platform.target }} \
             --manylinux ${{ matrix.manylinux }} \
             -m pyDF/Cargo.toml
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: libdf-arm-wheels
           path: dist/
@@ -337,7 +337,7 @@ jobs:
           mv "target/${{ matrix.target }}/release/deep-filter${{ matrix.ext }}" "${{ env.TARGET_DIR }}/${{ env.DF_BIN_NAME }}"
           chmod +x "${{ env.TARGET_DIR }}/${{ env.DF_BIN_NAME }}"
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.DF_BIN_NAME }}
           path: ${{ env.TARGET_DIR }}/${{ env.DF_BIN_NAME }}
@@ -433,7 +433,7 @@ jobs:
         run: |
           mv "target/${{ matrix.target }}/release-lto/${{ matrix.libname }}.${{ matrix.libext }}" "${{ env.TARGET_DIR }}/${{ env.DF_LADSPA_NAME }}"
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.DF_LADSPA_NAME }}
           path: ${{ env.TARGET_DIR }}/${{ env.DF_LADSPA_NAME }}
