@@ -1196,6 +1196,7 @@ class TorchDFMinimalPipeline(nn.Module):
 
         input_audio = input_audio.squeeze(0)
         orig_len = input_audio.shape[0]
+        print("original_length", orig_len)
 
         # padding taken from
         # https://github.com/Rikorose/DeepFilterNet/blob/fa926662facea33657c255fd1f3a083ddc696220/DeepFilterNet/df/enhance.py#L229
@@ -1206,8 +1207,9 @@ class TorchDFMinimalPipeline(nn.Module):
         input_audio = F.pad(
             input_audio, (0, self.fft_size + hop_size_divisible_padding_size)
         )
-
+        print("hope size", self.hop_size)
         chunked_audio = torch.split(input_audio, self.hop_size)
+        print("size of chunk", len(chunked_audio))
 
         output_frames = []
 

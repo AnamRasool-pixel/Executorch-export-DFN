@@ -1,3 +1,4 @@
+import os
 import copy
 import onnx
 import argparse
@@ -9,15 +10,20 @@ import numpy as np
 import onnxruntime as ort
 import torch.utils.benchmark as benchmark
 
-from torch_df_streaming_minimal import TorchDFMinimalPipeline
 from torch_df_streaming import TorchDFPipeline
 from typing import Dict, Iterable
-from torch.onnx._internal import jit_utils
-from loguru import logger
 
 torch.manual_seed(0)
 
-OPSET_VERSION = 17
+FRAME_SIZE = 480
+INPUT_NAMES = [
+    'input_frame', 
+    'states',
+    'atten_lim_db'
+]
+OUTPUT_NAMES = [
+    'enhanced_audio_frame', 'out_states', 'lsnr'
+]
 
 
 def onnx_simplify(
@@ -25,7 +31,7 @@ def onnx_simplify(
 ) -> str:
     """
     Simplify ONNX model using onnxsim and checking it
-
+    
     Parameters:
         path:           str - Path to ONNX model
         input_data:     Dict[str, np.ndarray] - Input data for ONNX model
@@ -47,10 +53,7 @@ def onnx_simplify(
     onnx.save_model(model_simp, path)
     return path
 
-
-def test_onnx_model(
-    torch_model, ort_session, states, frame_size, input_names, output_names
-):
+def test_onnx_model(torch_model, ort_session, states, atten_lim_db):
     """
     Simple test that everything converted correctly
 
@@ -63,29 +66,30 @@ def test_onnx_model(
     states_onnx = copy.deepcopy(states)
 
     for i in range(30):
-        input_frame = torch.randn(frame_size)
+        input_frame = torch.randn(FRAME_SIZE)
 
         # torch
-        output_torch = torch_model(input_frame, *states_torch)
+        output_torch = torch_model(input_frame, states_torch, atten_lim_db)
 
         # onnx
         output_onnx = ort_session.run(
-            output_names,
-            generate_onnx_features([input_frame, *states_onnx], input_names),
+            OUTPUT_NAMES,
+            generate_onnx_features([input_frame, states_onnx, atten_lim_db]),
         )
 
-        for x, y, name in zip(output_torch, output_onnx, output_names):
+        for (x, y, name) in zip(output_torch, output_onnx, OUTPUT_NAMES):
             y_tensor = torch.from_numpy(y)
-            assert torch.allclose(
-                x, y_tensor, atol=1e-2
-            ), f"out {name} - {i}, {x.flatten()[-5:]}, {y_tensor.flatten()[-5:]}"
+            assert torch.allclose(x, y_tensor, atol=1e-3), f"out {name} - {i}, {x.flatten()[-5:]}, {y_tensor.flatten()[-5:]}"
 
+def generate_onnx_features(input_features):
+    return {
+        x: y.detach().cpu().numpy() 
+        for x, y in zip(INPUT_NAMES, input_features)
+    }
 
-def generate_onnx_features(input_features, input_names):
-    return {x: y.detach().cpu().numpy() for x, y in zip(input_names, input_features)}
-
-
-def perform_benchmark(ort_session, input_features: Dict[str, np.ndarray], output_names):
+def perform_benchmark(
+    ort_session, input_features: Dict[str, np.ndarray],
+):
     """
     Benchmark ONNX model performance
 
@@ -93,225 +97,164 @@ def perform_benchmark(ort_session, input_features: Dict[str, np.ndarray], output
         ort_session:    onnxruntime.InferenceSession - Inference Session for converted ONNX model
         input_features: Dict[str, np.ndarray] - Input features
     """
-
     def run_onnx():
         output = ort_session.run(
-            output_names,
+            OUTPUT_NAMES,
             input_features,
         )
-
+    
     t0 = benchmark.Timer(
-        stmt="run_onnx()",
+        stmt='run_onnx()',
         num_threads=1,
-        globals={"run_onnx": run_onnx},
+        globals={'run_onnx': run_onnx},
     )
-    logger.info(
-        f"Median iteration time: {t0.blocked_autorange(min_run_time=10).median * 1e3:6.2f} ms / {480 / 48000 * 1000} ms"
-    )
+    print(f"Median iteration time: {t0.blocked_autorange(min_run_time=10).median * 1e3:6.2f} ms / {480 / 48000 * 1000} ms")
 
-
-def infer_onnx_model(
-    streaming_pipeline, ort_session, inference_path, input_names, output_names
-):
+def infer_onnx_model(streaming_pipeline, ort_session, inference_path):
     """
     Inference ONNX model with TorchDFPipeline
     """
     del streaming_pipeline.torch_streaming_model
     streaming_pipeline.torch_streaming_model = lambda *features: (
-        torch.from_numpy(x)
-        for x in ort_session.run(
-            output_names,
-            generate_onnx_features(list(features), input_names),
+        torch.from_numpy(x) for x in ort_session.run(
+            OUTPUT_NAMES,
+            generate_onnx_features(list(features)),
         )
     )
-
+def debug_features(*features):
+    feature_list = list(features)
+    print("Features:")
+    for i, feature in enumerate(feature_list):
+        print(f"Feature {i}: {feature}")
+        print(f"Shape: {feature.shape}")
+    return [torch.from_numpy(x) for x in ort_session.run(
+        OUTPUT_NAMES,
+        generate_onnx_features(feature_list),
+    )]
+    streaming_pipeline.torch_streaming_model = debug_features
     noisy_audio, sr = torchaudio.load(inference_path, channels_first=True)
-    noisy_audio = noisy_audio.mean(dim=0).unsqueeze(0)  # stereo to mono
+    noisy_audio = noisy_audio.mean(dim=0).unsqueeze(0) # stereo to mono
 
     enhanced_audio = streaming_pipeline(noisy_audio, sr)
 
     torchaudio.save(
-        inference_path.replace(".wav", "_onnx_infer.wav"),
-        enhanced_audio,
-        sr,
-        encoding="PCM_S",
-        bits_per_sample=16,
-    )
-
-
-# setType API provides shape/type to ONNX shape/type inference
-def custom_rfft(g: jit_utils.GraphContext, X, n, dim, norm):
-    x = g.op(
-        "Unsqueeze",
-        X,
-        g.op("Constant", value_t=torch.tensor([-1], dtype=torch.int64)),
-    )
-    x = g.op(
-        "Unsqueeze",
-        x,
-        g.op("Constant", value_t=torch.tensor([0], dtype=torch.int64)),
-    )
-    x = g.op("DFT", x, axis_i=1, inverse_i=0, onesided_i=1)
-    x = g.op(
-        "Squeeze",
-        x,
-        g.op("Constant", value_t=torch.tensor([0], dtype=torch.int64)),
-    )
-
-    return x
-
-
-# setType API provides shape/type to ONNX shape/type inference
-def custom_identity(g: jit_utils.GraphContext, X):
-    return X
-
+        inference_path.replace('.wav', '_onnx_infer.wav'), enhanced_audio, sr,
+        encoding="PCM_S", bits_per_sample=16
+    )    
 
 def main(args):
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
-
-    if args.minimal:
-        streaming_pipeline = TorchDFMinimalPipeline(device="cpu")
-    else:
-        streaming_pipeline = TorchDFPipeline(device="cpu", always_apply_all_stages=True)
-
-    frame_size = streaming_pipeline.hop_size
-    input_names = streaming_pipeline.input_names
-    output_names = streaming_pipeline.output_names
-
+    print(args)
+    streaming_pipeline = TorchDFPipeline(always_apply_all_stages=args.always_apply_all_stages, device='cpu')
     torch_df = streaming_pipeline.torch_streaming_model
     states = streaming_pipeline.states
+    atten_lim_db = streaming_pipeline.atten_lim_db
 
-    input_frame = torch.rand(frame_size)
-    input_features = (input_frame, *states)
-    torch_df(*input_features)  # check model
-
-    torch.onnx.register_custom_op_symbolic(
-        symbolic_name="aten::fft_rfft",
-        symbolic_fn=custom_rfft,
-        opset_version=OPSET_VERSION,
+    input_frame = torch.rand(FRAME_SIZE)
+    input_features = (
+        input_frame, states, atten_lim_db
     )
-    # Only used with aten::fft_rfft, so it's useless in ONNX
-    torch.onnx.register_custom_op_symbolic(
-        symbolic_name="aten::view_as_real",
-        symbolic_fn=custom_identity,
-        opset_version=OPSET_VERSION,
-    )
+    torch_df(*input_features) # check model
 
     torch_df_script = torch.jit.script(torch_df)
-
     torch.onnx.export(
         torch_df_script,
         input_features,
         args.output_path,
         verbose=False,
-        input_names=input_names,
-        output_names=output_names,
-        opset_version=OPSET_VERSION,
+        input_names=INPUT_NAMES,
+        output_names=OUTPUT_NAMES,
+        opset_version=14
     )
-    logger.info(f"Model exported to {args.output_path}!")
+    print(f'Model exported to {args.output_path}!')
 
-    input_features_onnx = generate_onnx_features(input_features, input_names)
-    input_shapes_dict = {x: y.shape for x, y in input_features_onnx.items()}
+     # Add or update the ML opset version
+    model = onnx.load(args.output_path)
+    ml_opset_version = 3  # Specify your desired ML opset version here
+    ml_opset_updated = False
+    for opset in model.opset_import:
+        if opset.domain == "ai.onnx.ml":
+            opset.version = ml_opset_version
+            ml_opset_updated = True
+            break
+    if not ml_opset_updated:
+        ml_opset = onnx.helper.make_opsetid("ai.onnx.ml", ml_opset_version)
+        model.opset_import.append(ml_opset)
+    onnx.save(model, args.output_path)
+    print(f'ML opset version set to {ml_opset_version}!')
 
-    # Simplify not working for not minimal!
+    input_features_onnx = generate_onnx_features(input_features)
+    input_shapes_dict = {
+        x: y.shape
+        for x, y in input_features_onnx.items()
+    }
+
+    # Simplify not working!
     if args.simplify:
-        # raise NotImplementedError("Simplify not working for flatten states!")
+        raise NotImplementedError("Simplify not working for flatten states!")
         onnx_simplify(args.output_path, input_features_onnx, input_shapes_dict)
-        logger.info(f"Model simplified! {args.output_path}")
+        print(f'Model simplified! {args.output_path}')
 
     if args.ort:
-        if (
-            subprocess.run(
-                [
-                    "python",
-                    "-m",
-                    "onnxruntime.tools.convert_onnx_models_to_ort",
-                    args.output_path,
-                    "--optimization_style",
-                    "Fixed",
-                ]
-            ).returncode
-            != 0
-        ):
+        if subprocess.run([
+            'python', '-m', 'onnxruntime.tools.convert_onnx_models_to_ort',
+            args.output_path,
+            '--optimization_style', 'Fixed',
+        ]).returncode != 0:
             raise RuntimeError("ONNX to ORT conversion failed!")
-        logger.info("Model converted to ORT format!")
+        print('Model converted to ORT format!')
 
-    logger.info("Checking model...")
+    print('Checking model...')
     sess_options = ort.SessionOptions()
-    sess_options.graph_optimization_level = (
-        ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
-    )
+    sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
     sess_options.optimized_model_filepath = args.output_path
     sess_options.intra_op_num_threads = 1
-    sess_options.inter_op_num_threads = 1
     sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    sess_options.enable_profiling = args.profiling
 
-    ort_session = ort.InferenceSession(
-        args.output_path,
-        sess_options,
-        providers=["CPUExecutionProvider"],
+    ort_session = ort.InferenceSession(args.output_path, sess_options, providers=['CPUExecutionProvider'])
+
+    onnx_outputs = ort_session.run(
+        OUTPUT_NAMES,
+        input_features_onnx,
     )
 
-    for _ in range(3):
-        onnx_outputs = ort_session.run(
-            output_names,
-            input_features_onnx,
-        )
-
-    if args.profiling:
-        logger.info("Profiling enabled...")
-        ort_session.end_profiling()
-
-    logger.info(
-        f"InferenceSession successful! Output shapes: {[x.shape for x in onnx_outputs]}"
-    )
+    print(f'InferenceSession successful! Output shapes: {[x.shape for x in onnx_outputs]}')
 
     if args.test:
-        logger.info("Testing...")
-        test_onnx_model(
-            torch_df,
-            ort_session,
-            input_features[1:],
-            frame_size,
-            input_names,
-            output_names,
-        )
-        logger.info("Tests passed!")
+        test_onnx_model(torch_df, ort_session, input_features[1], input_features[2])
+        print('Tests passed!')
 
     if args.performance:
-        logger.info("Performanse check...")
-        perform_benchmark(ort_session, input_features_onnx, output_names)
+        print('Performanse check...')
+        perform_benchmark(ort_session, input_features_onnx)
 
     if args.inference_path:
-        infer_onnx_model(
-            streaming_pipeline,
-            ort_session,
-            args.inference_path,
-            input_names,
-            output_names,
-        )
-        logger.info(f"Audio from {args.inference_path} enhanced!")
+        infer_onnx_model(streaming_pipeline, ort_session, args.inference_path)
+        print(f'Audio from {args.inference_path} enhanced!')
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Exporting torchDF model to ONNX")
-    parser.add_argument(
-        "--output-path",
-        type=str,
-        default="denoiser_model.onnx",
-        help="Path to output onnx file",
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='Exporting torchDF model to ONNX'
     )
-    parser.add_argument("--simplify", action="store_true", help="Simplify the model")
-    parser.add_argument("--test", action="store_true", help="Test the onnx model")
     parser.add_argument(
-        "--performance",
-        action="store_true",
-        help="Mesure median iteration time for onnx model",
+        '--output-path', type=str, default='denoiser_model.onnx', help='Path to output onnx file'
     )
-    parser.add_argument("--inference-path", type=str, help="Run inference on example")
-    parser.add_argument("--ort", action="store_true", help="Save to ort format")
-    parser.add_argument("--profiling", action="store_true", help="Run ONNX profiler")
-    parser.add_argument("--minimal", action="store_true", help="Export minimal version")
+    parser.add_argument(
+        '--simplify', action='store_true', help='Simplify the model'
+    )
+    parser.add_argument(
+        '--test', action='store_true', help='Test the onnx model'
+    )
+    parser.add_argument(
+        '--performance', action='store_true', help='Mesure median iteration time for onnx model'
+    )
+    parser.add_argument(
+        '--inference-path', type=str, help='Run inference on example'
+    )
+    parser.add_argument(
+        '--ort', action='store_true', help='Save to ort format'
+    )
+    parser.add_argument(
+        '--always-apply-all-stages', action='store_true', help='Always apply stages'
+    )
     main(parser.parse_args())

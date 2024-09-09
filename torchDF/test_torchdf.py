@@ -1,13 +1,21 @@
 import copy
 import torch
 import torchaudio
+import sys
+import os
+backends = torchaudio.list_audio_backends()
+print("Available audio backends:", backends)
+
+# # Add the absolute path to the 'df' module
+# module_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'DeepFilterNet', 'df'))
+# sys.path.insert(0, module_path)
+# print("here is the path ",module_path)
 
 from df import init_df, enhance
 from torch_df_offline import TorchDF
 from libdf import DFTractPy
 from torch_df_streaming import TorchDFPipeline
 from torch_df_streaming_minimal import TorchDFMinimalPipeline
-
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
