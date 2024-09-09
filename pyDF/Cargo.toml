@@ -18,6 +18,6 @@ deep_filter = { path = "../libDF", default-features = false, features = [
 ] }
 
 pyo3 = { version = "0.19", features = ["extension-module"]}
-numpy = "0.19"
+numpy = "0.21"
 ndarray = "^0.15"
 tract-core = "^0.19.4"
